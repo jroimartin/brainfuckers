@@ -57,6 +57,64 @@ impl Mmu {
     }
 }
 
+/// Brainfuck instruction.
+enum Instruction {
+    /// Increment data pointer (`>`).
+    IncPtr,
+
+    /// Decrement data pointer (`<`).
+    DecPtr,
+
+    /// Increment data byte (`+`).
+    IncData,
+
+    /// Decrement data byte (`-`).
+    DecData,
+
+    /// Write byte to output stream (`.`).
+    Output,
+
+    /// Read byte from input stream (`,`).
+    Input,
+
+    /// Start loop (`[`).
+    StartLoop,
+
+    /// End loop (`]`).
+    EndLoop,
+
+    /// No operation (` `, `\t`, `\n`).
+    Nop,
+}
+
+impl TryFrom<u8> for Instruction {
+    type Error = Error;
+
+    fn try_from(value: u8) -> Result<Instruction, Error> {
+        match value {
+            b'>' => Ok(Instruction::IncPtr),
+            b'<' => Ok(Instruction::DecPtr),
+            b'+' => Ok(Instruction::IncData),
+            b'-' => Ok(Instruction::DecData),
+            b'.' => Ok(Instruction::Output),
+            b',' => Ok(Instruction::Input),
+            b'[' => Ok(Instruction::StartLoop),
+            b']' => Ok(Instruction::EndLoop),
+            b' ' | b'\t' | b'\n' => Ok(Instruction::Nop),
+            _ => Err(Error::InvalidInst(value)),
+        }
+    }
+}
+
+/// Loop position.
+enum LoopAt {
+    /// Start of the loop.
+    Start,
+
+    /// End of the loop.
+    End,
+}
+
 /// The `OutputStream` trait allows for writing bytes to an output stream.
 pub trait OutputStream {
     /// Writes a byte to the output stream.
@@ -85,15 +143,6 @@ pub struct Emu<'a> {
 
     /// Input stream handler.
     input_stream: Option<&'a dyn InputStream>,
-}
-
-/// Loop position.
-enum LoopAt {
-    /// Start of the loop.
-    Start,
-
-    /// End of the loop.
-    End,
 }
 
 impl<'a> Emu<'a> {
@@ -132,33 +181,32 @@ impl<'a> Emu<'a> {
     fn run_inst(&mut self) -> Result<(), Error> {
         let mut off = 1;
 
-        match self.mmu.read_byte(self.pc)? {
-            b'>' => self.ptr = self.ptr.wrapping_add(1),
-            b'<' => self.ptr = self.ptr.wrapping_sub(1),
-            b'+' => {
+        match self.mmu.read_byte(self.pc)?.try_into()? {
+            Instruction::IncPtr => self.ptr = self.ptr.wrapping_add(1),
+            Instruction::DecPtr => self.ptr = self.ptr.wrapping_sub(1),
+            Instruction::IncData => {
                 let b = self.mmu.read_byte(self.ptr)?;
                 self.mmu.write_byte(self.ptr, b.wrapping_add(1))?
             }
-            b'-' => {
+            Instruction::DecData => {
                 let b = self.mmu.read_byte(self.ptr)?;
                 self.mmu.write_byte(self.ptr, b.wrapping_sub(1))?
             }
-            b'.' => {
+            Instruction::Output => {
                 if let Some(stream) = self.output_stream {
                     let b = self.mmu.read_byte(self.ptr)?;
                     stream.write_byte(b)?
                 }
             }
-            b',' => {
+            Instruction::Input => {
                 if let Some(stream) = self.input_stream {
                     let b = stream.read_byte()?;
                     self.mmu.write_byte(self.ptr, b)?;
                 }
             }
-            b'[' => off = self.jump_offset(LoopAt::Start)?,
-            b']' => off = self.jump_offset(LoopAt::End)?,
-            b' ' | b'\t' | b'\n' => {}
-            inst => return Err(Error::InvalidInst(inst)),
+            Instruction::StartLoop => off = self.jump_offset(LoopAt::Start)?,
+            Instruction::EndLoop => off = self.jump_offset(LoopAt::End)?,
+            Instruction::Nop => {}
         }
 
         self.pc = self.pc.wrapping_add_signed(off);
@@ -180,20 +228,19 @@ impl<'a> Emu<'a> {
         let mut ctr: usize = 0;
         let mut off: isize = 0;
         loop {
-            let inst = self.mmu.read_byte(self.pc.wrapping_add_signed(off))?;
-            match inst {
-                b'[' => {
+            let pc = self.pc.wrapping_add_signed(off);
+            match self.mmu.read_byte(pc)?.try_into()? {
+                Instruction::StartLoop => {
                     ctr = ctr
                         .checked_add_signed(step)
                         .ok_or(Error::InvalidLoopState)?
                 }
-                b']' => {
+                Instruction::EndLoop => {
                     ctr = ctr
                         .checked_add_signed(-step)
                         .ok_or(Error::InvalidLoopState)?
                 }
-                b'>' | b'<' | b'+' | b'-' | b'.' | b',' | b' ' | b'\t' | b'\n' => {}
-                inst => return Err(Error::InvalidInst(inst)),
+                _ => {}
             }
             off = off.checked_add(step).ok_or(Error::Overflow)?;
 
@@ -403,6 +450,19 @@ mod tests {
     #[test]
     fn invalid_inst() {
         let code = "++X";
+        let mut mmu = Mmu::new(16);
+        mmu.write(0, &code).unwrap();
+        let stream = TestStream::new();
+        let mut emu = Emu::new(mmu, 0, 8).output_stream(&stream);
+        let res = emu.run();
+        if !matches!(res, Err(Error::InvalidInst(b'X'))) {
+            panic!("unexpected result: {res:?}");
+        }
+    }
+
+    #[test]
+    fn invalid_loop_inst() {
+        let code = "[X]";
         let mut mmu = Mmu::new(16);
         mmu.write(0, &code).unwrap();
         let stream = TestStream::new();
