@@ -91,8 +91,23 @@ pub trait InputStream {
     fn read_byte(&self) -> Result<u8, Error>;
 }
 
+/// No operation I/O stream.
+pub struct NopStream;
+
+impl OutputStream for NopStream {
+    fn write_byte(&self, _b: u8) -> Result<(), Error> {
+        Ok(())
+    }
+}
+
+impl InputStream for NopStream {
+    fn read_byte(&self) -> Result<u8, Error> {
+        Ok(0)
+    }
+}
+
 /// Brainfuck interpreter.
-pub struct Interpreter<'a> {
+pub struct Interpreter<'a, O: OutputStream = NopStream, I: InputStream = NopStream> {
     /// Program counter.
     pc: usize,
 
@@ -103,10 +118,10 @@ pub struct Interpreter<'a> {
     mem: Arc<Mutex<Vec<u8>>>,
 
     /// Output stream handler.
-    output_stream: Option<&'a dyn OutputStream>,
+    output_stream: &'a O,
 
     /// Input stream handler.
-    input_stream: Option<&'a dyn InputStream>,
+    input_stream: &'a I,
 }
 
 impl<'a> Interpreter<'a> {
@@ -117,21 +132,52 @@ impl<'a> Interpreter<'a> {
             pc,
             ptr,
             mem,
-            output_stream: None,
-            input_stream: None,
+            output_stream: &NopStream,
+            input_stream: &NopStream,
         }
     }
+}
 
-    /// Set output stream handler.
-    pub fn output_stream<O: OutputStream>(mut self, stream: &'a O) -> Interpreter {
-        self.output_stream = Some(stream);
-        self
+impl<'a, O: OutputStream> Interpreter<'a, O, NopStream> {
+    /// Like [`Interpreter::new`] but allows to specify an output stream.
+    pub fn with_output_stream(
+        mem: Arc<Mutex<Vec<u8>>>,
+        pc: usize,
+        ptr: usize,
+        output_stream: &'a O,
+    ) -> Interpreter<'a, O, NopStream> {
+        Self::with_streams(mem, pc, ptr, output_stream, &NopStream)
     }
+}
 
-    /// Set input stream handler.
-    pub fn input_stream<I: InputStream>(mut self, stream: &'a I) -> Interpreter {
-        self.input_stream = Some(stream);
-        self
+impl<'a, I: InputStream> Interpreter<'a, NopStream, I> {
+    /// Like [`Interpreter::new`] but allows to specify an input stream.
+    pub fn with_input_stream(
+        mem: Arc<Mutex<Vec<u8>>>,
+        pc: usize,
+        ptr: usize,
+        input_stream: &'a I,
+    ) -> Interpreter<'a, NopStream, I> {
+        Self::with_streams(mem, pc, ptr, &NopStream, input_stream)
+    }
+}
+
+impl<'a, O: OutputStream, I: InputStream> Interpreter<'a, O, I> {
+    /// Like [`Interpreter::new`] but allows to specify the I/O streams.
+    pub fn with_streams(
+        mem: Arc<Mutex<Vec<u8>>>,
+        pc: usize,
+        ptr: usize,
+        output_stream: &'a O,
+        input_stream: &'a I,
+    ) -> Interpreter<'a, O, I> {
+        Interpreter {
+            pc,
+            ptr,
+            mem,
+            output_stream,
+            input_stream,
+        }
     }
 
     /// Run code at program counter until error.
@@ -142,7 +188,7 @@ impl<'a> Interpreter<'a> {
     }
 
     /// Run a single instruction at program counter.
-    fn run_inst(&mut self) -> Result<(), Error> {
+    pub fn run_inst(&mut self) -> Result<(), Error> {
         let mut off = 1;
 
         match self.read_byte(self.pc)?.try_into()? {
@@ -157,16 +203,12 @@ impl<'a> Interpreter<'a> {
                 self.write_byte(self.ptr, b.wrapping_sub(1))?
             }
             Instruction::Output => {
-                if let Some(stream) = self.output_stream {
-                    let b = self.read_byte(self.ptr)?;
-                    stream.write_byte(b)?
-                }
+                let b = self.read_byte(self.ptr)?;
+                self.output_stream.write_byte(b)?
             }
             Instruction::Input => {
-                if let Some(stream) = self.input_stream {
-                    let b = stream.read_byte()?;
-                    self.write_byte(self.ptr, b)?;
-                }
+                let b = self.input_stream.read_byte()?;
+                self.write_byte(self.ptr, b)?;
             }
             Instruction::StartLoop => off = self.jump_offset(LoopAt::Start)?,
             Instruction::EndLoop => off = self.jump_offset(LoopAt::End)?,
@@ -284,6 +326,17 @@ mod tests {
     }
 
     #[test]
+    fn run_inst() {
+        let mem = new_mem("++++", 16);
+        let mut bf = Interpreter::new(Arc::clone(&mem), 0, 8);
+        bf.run_inst().expect("run instruction");
+        assert_eq!(
+            mem.lock().expect("acquire lock").get(8).expect("read byte"),
+            &1
+        );
+    }
+
+    #[test]
     fn inc_data_ptr() {
         let mem = new_mem(">", 16);
         let mut bf = Interpreter::new(mem, 0, 8);
@@ -337,7 +390,7 @@ mod tests {
     fn output_stream() {
         let mem = new_mem("+++.", 16);
         let stream = TestStream::new();
-        let mut bf = Interpreter::new(mem, 0, 8).output_stream(&stream);
+        let mut bf = Interpreter::with_output_stream(mem, 0, 8, &stream);
         let res = bf.run();
         if !matches!(res, Err(Error::InvalidInst(0))) {
             panic!("unexpected result: {res:?}");
@@ -349,7 +402,7 @@ mod tests {
     fn input_stream() {
         let mem = new_mem(",", 16);
         let stream = TestStream::new();
-        let mut bf = Interpreter::new(Arc::clone(&mem), 0, 8).input_stream(&stream);
+        let mut bf = Interpreter::with_input_stream(Arc::clone(&mem), 0, 8, &stream);
         let res = bf.run();
         if !matches!(res, Err(Error::InvalidInst(0))) {
             panic!("unexpected result: {res:?}");
@@ -425,7 +478,7 @@ mod tests {
         "#;
         let mem = new_mem(code, 1024);
         let stream = TestStream::new();
-        let mut bf = Interpreter::new(mem, 0, 512).output_stream(&stream);
+        let mut bf = Interpreter::with_output_stream(mem, 0, 512, &stream);
         let res = bf.run();
         if !matches!(res, Err(Error::InvalidInst(0))) {
             panic!("unexpected result: {res:?}");
@@ -437,7 +490,7 @@ mod tests {
     fn invalid_inst() {
         let mem = new_mem("++X", 16);
         let stream = TestStream::new();
-        let mut bf = Interpreter::new(mem, 0, 8).output_stream(&stream);
+        let mut bf = Interpreter::with_output_stream(mem, 0, 8, &stream);
         let res = bf.run();
         if !matches!(res, Err(Error::InvalidInst(b'X'))) {
             panic!("unexpected result: {res:?}");
@@ -448,7 +501,7 @@ mod tests {
     fn invalid_loop_inst() {
         let mem = new_mem("[X]", 16);
         let stream = TestStream::new();
-        let mut bf = Interpreter::new(mem, 0, 8).output_stream(&stream);
+        let mut bf = Interpreter::with_output_stream(mem, 0, 8, &stream);
         let res = bf.run();
         if !matches!(res, Err(Error::InvalidInst(b'X'))) {
             panic!("unexpected result: {res:?}");
