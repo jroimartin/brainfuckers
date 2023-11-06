@@ -327,12 +327,14 @@ mod tests {
 
     #[test]
     fn run_inst() {
-        let mem = new_mem("++++", 16);
+        let mem = new_mem("+-+++", 16);
         let mut bf = Interpreter::new(Arc::clone(&mem), 0, 8);
-        bf.run_inst().expect("run instruction");
+        for _ in 0..5 {
+            bf.run_inst().expect("run instruction");
+        }
         assert_eq!(
             mem.lock().expect("acquire lock").get(8).expect("read byte"),
-            &1
+            &3
         );
     }
 
