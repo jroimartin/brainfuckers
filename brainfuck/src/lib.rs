@@ -507,4 +507,19 @@ mod tests {
             panic!("unexpected result: {res:?}");
         }
     }
+
+    #[test]
+    fn nop_stream() {
+        let mem = new_mem("+,", 16);
+        let stream = NopStream;
+        let mut bf = Interpreter::with_streams(Arc::clone(&mem), 0, 8, &stream, &stream);
+        let res = bf.run();
+        if !matches!(res, Err(Error::InvalidInst(0))) {
+            panic!("unexpected result: {res:?}");
+        }
+        assert_eq!(
+            mem.lock().expect("acquire lock").get(8).expect("read byte"),
+            &0
+        );
+    }
 }
