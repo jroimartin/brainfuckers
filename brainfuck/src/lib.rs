@@ -510,7 +510,7 @@ mod tests {
 
     #[test]
     fn nop_stream() {
-        let mem = new_mem("+,", 16);
+        let mem = new_mem("+,.", 16);
         let stream = NopStream;
         let mut bf = Interpreter::with_streams(Arc::clone(&mem), 0, 8, &stream, &stream);
         let res = bf.run();
