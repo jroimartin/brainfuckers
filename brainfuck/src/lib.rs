@@ -217,6 +217,10 @@ impl<'a> Interpreter<'a> {
     }
 
     /// Reads the byte at `off`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the memory lock cannot be acquired.
     fn read_byte(&self, off: usize) -> Result<u8, Error> {
         let mem = self.mem.lock().expect("acquire lock");
         let b = mem.get(off).ok_or(Error::Oob(off))?;
@@ -224,6 +228,10 @@ impl<'a> Interpreter<'a> {
     }
 
     /// Writes `b` at `off`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the memory lock cannot be acquired.
     fn write_byte(&mut self, off: usize, b: u8) -> Result<(), Error> {
         let mut mem = self.mem.lock().expect("acquire lock");
         *mem.get_mut(off).ok_or(Error::Oob(off))? = b;
