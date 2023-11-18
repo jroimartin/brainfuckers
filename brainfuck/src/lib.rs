@@ -316,7 +316,7 @@ mod tests {
         }
     }
 
-    fn new_mem<D: AsRef<[u8]>>(data: D, size: usize) -> Arc<Mutex<Vec<u8>>> {
+    fn new_mem(data: impl AsRef<[u8]>, size: usize) -> Arc<Mutex<Vec<u8>>> {
         let data = data.as_ref();
         let mut mem = vec![0; size];
         mem.get_mut(..data.len())
@@ -533,6 +533,35 @@ mod tests {
         assert_eq!(
             mem.lock().expect("acquire lock").get(8).expect("read byte"),
             &0
+        );
+    }
+
+    #[test]
+    fn shared_memory() {
+        let mut mem = vec![0; 64];
+        mem[0] = b'+';
+        mem[32] = b'-';
+
+        let mem = Arc::new(Mutex::new(mem));
+        let mut a = Interpreter::new(Arc::clone(&mem), 0, 16);
+        let mut b = Interpreter::new(Arc::clone(&mem), 32, 48);
+
+        a.run_inst().expect("a failed to run inst");
+        b.run_inst().expect("b failed to run inst");
+
+        assert_eq!(
+            mem.lock()
+                .expect("acquire lock")
+                .get(16)
+                .expect("read byte"),
+            &1,
+        );
+        assert_eq!(
+            mem.lock()
+                .expect("acquire lock")
+                .get(48)
+                .expect("read byte"),
+            &0xff,
         );
     }
 }
