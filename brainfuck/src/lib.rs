@@ -107,7 +107,7 @@ impl InputStream for NopStream {
 }
 
 /// Brainfuck interpreter.
-pub struct Interpreter<'a, O: OutputStream = NopStream, I: InputStream = NopStream> {
+pub struct Interpreter<O: OutputStream = NopStream, I: InputStream = NopStream> {
     /// Program counter.
     pc: usize,
 
@@ -118,59 +118,59 @@ pub struct Interpreter<'a, O: OutputStream = NopStream, I: InputStream = NopStre
     mem: Arc<Mutex<Vec<u8>>>,
 
     /// Output stream handler.
-    output_stream: &'a O,
+    output_stream: O,
 
     /// Input stream handler.
-    input_stream: &'a I,
+    input_stream: I,
 }
 
-impl<'a> Interpreter<'a> {
+impl Interpreter {
     /// Returns a new brainfuck interpreter. The program counter is initialized to `pc` and the data
     /// pointer is initialized to `ptr`.
-    pub fn new(mem: Arc<Mutex<Vec<u8>>>, pc: usize, ptr: usize) -> Interpreter<'a> {
+    pub fn new(mem: Arc<Mutex<Vec<u8>>>, pc: usize, ptr: usize) -> Interpreter {
         Interpreter {
             pc,
             ptr,
             mem,
-            output_stream: &NopStream,
-            input_stream: &NopStream,
+            output_stream: NopStream,
+            input_stream: NopStream,
         }
     }
 }
 
-impl<'a, O: OutputStream> Interpreter<'a, O, NopStream> {
+impl<O: OutputStream> Interpreter<O, NopStream> {
     /// Like [`Interpreter::new`] but allows to specify an output stream.
     pub fn with_output_stream(
         mem: Arc<Mutex<Vec<u8>>>,
         pc: usize,
         ptr: usize,
-        output_stream: &'a O,
-    ) -> Interpreter<'a, O, NopStream> {
-        Self::with_streams(mem, pc, ptr, output_stream, &NopStream)
+        output_stream: O,
+    ) -> Interpreter<O, NopStream> {
+        Self::with_streams(mem, pc, ptr, output_stream, NopStream)
     }
 }
 
-impl<'a, I: InputStream> Interpreter<'a, NopStream, I> {
+impl<I: InputStream> Interpreter<NopStream, I> {
     /// Like [`Interpreter::new`] but allows to specify an input stream.
     pub fn with_input_stream(
         mem: Arc<Mutex<Vec<u8>>>,
         pc: usize,
         ptr: usize,
-        input_stream: &'a I,
-    ) -> Interpreter<'a, NopStream, I> {
-        Self::with_streams(mem, pc, ptr, &NopStream, input_stream)
+        input_stream: I,
+    ) -> Interpreter<NopStream, I> {
+        Self::with_streams(mem, pc, ptr, NopStream, input_stream)
     }
 }
 
-impl<'a, O: OutputStream, I: InputStream> Interpreter<'a, O, I> {
+impl<O: OutputStream, I: InputStream> Interpreter<O, I> {
     /// Like [`Interpreter::new`] but allows to specify the I/O streams.
     pub fn with_streams(
         mem: Arc<Mutex<Vec<u8>>>,
         pc: usize,
         ptr: usize,
-        output_stream: &'a O,
-        input_stream: &'a I,
-    ) -> Interpreter<'a, O, I> {
+        output_stream: O,
+        input_stream: I,
+    ) -> Interpreter<O, I> {
         Interpreter {
             pc,
             ptr,
@@ -303,14 +303,14 @@ mod tests {
         }
     }
 
-    impl OutputStream for TestStream {
+    impl OutputStream for &TestStream {
         fn write_byte(&self, b: u8) -> Result<(), Error> {
             self.buf.borrow_mut().push(b);
             Ok(())
         }
     }
 
-    impl InputStream for TestStream {
+    impl InputStream for &TestStream {
         fn read_byte(&self) -> Result<u8, Error> {
             Ok(0xaa)
         }
@@ -416,6 +416,18 @@ mod tests {
     }
 
     #[test]
+    fn input_output_streams() {
+        let mem = new_mem(",.", 16);
+        let stream = TestStream::new();
+        let mut bf = Interpreter::with_streams(mem, 0, 8, &stream, &stream);
+        let res = bf.run();
+        if !matches!(res, Err(Error::InvalidInst(0))) {
+            panic!("unexpected result: {res:?}");
+        }
+        assert_eq!(stream.buf(), &[0xaa])
+    }
+
+    #[test]
     fn simple_loop() {
         let mem = new_mem("++++[->+<]", 32);
         let mut bf = Interpreter::new(Arc::clone(&mem), 0, 16);
@@ -513,8 +525,7 @@ mod tests {
     #[test]
     fn nop_stream() {
         let mem = new_mem("+,.", 16);
-        let stream = NopStream;
-        let mut bf = Interpreter::with_streams(Arc::clone(&mem), 0, 8, &stream, &stream);
+        let mut bf = Interpreter::with_streams(Arc::clone(&mem), 0, 8, NopStream, NopStream);
         let res = bf.run();
         if !matches!(res, Err(Error::InvalidInst(0))) {
             panic!("unexpected result: {res:?}");
