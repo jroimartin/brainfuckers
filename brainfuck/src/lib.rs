@@ -1,7 +1,5 @@
 //! This crate implements a brainfuck interpreter.
 
-use std::sync::{Arc, Mutex};
-
 /// Error type.
 #[derive(Debug)]
 pub enum Error {
@@ -115,55 +113,41 @@ pub trait Mmu {
     fn write_byte(&mut self, off: usize, b: u8) -> Result<(), Error>;
 }
 
-/// Simple thread-safe memory management unit.
+/// Simple memory management unit.
 pub struct SimpleMmu {
-    mem: Arc<Mutex<Vec<u8>>>,
+    mem: Vec<u8>,
 }
 
 impl SimpleMmu {
     /// Returns a [`SimpleMmu`] backed by a buffer of `size` bytes initialized to zero.
     pub fn new(size: usize) -> SimpleMmu {
         SimpleMmu {
-            mem: Arc::new(Mutex::new(vec![0u8; size])),
+            mem: vec![0u8; size],
         }
     }
 
     /// Writes `data` into the memory starting at `off`.
-    ///
-    /// # Panics
-    ///
-    /// This function will panic if the memory lock cannot be acquired.
     pub fn write(&mut self, off: usize, data: impl AsRef<[u8]>) -> Result<(), Error> {
         let data = data.as_ref();
         let end = off.checked_add(data.len()).ok_or(Error::Overflow)?;
-        let mut mem = self.mem.lock().expect("acquire lock");
-        mem.get_mut(off..end)
+        self.mem
+            .get_mut(off..end)
             .ok_or(Error::OobRange(off, end))?
             .copy_from_slice(data);
         Ok(())
     }
 }
 
-impl Mmu for &SimpleMmu {
+impl Mmu for SimpleMmu {
     /// Reads byte at `off`.
-    ///
-    /// # Panics
-    ///
-    /// This function will panic if the memory lock cannot be acquired.
     fn read_byte(&self, off: usize) -> Result<u8, Error> {
-        let mmu = self.mem.lock().expect("acquire lock");
-        let b = *mmu.get(off).ok_or(Error::Oob(off))?;
+        let b = *self.mem.get(off).ok_or(Error::Oob(off))?;
         Ok(b)
     }
 
     /// Writes byte `b` at `off`.
-    ///
-    /// # Panics
-    ///
-    /// This function will panic if the memory lock cannot be acquired.
     fn write_byte(&mut self, off: usize, b: u8) -> Result<(), Error> {
-        let mut mem = self.mem.lock().expect("acquire lock");
-        *mem.get_mut(off).ok_or(Error::Oob(off))? = b;
+        *self.mem.get_mut(off).ok_or(Error::Oob(off))? = b;
         Ok(())
     }
 }
@@ -356,10 +340,20 @@ mod tests {
         }
     }
 
-    fn new_mmu(data: impl AsRef<[u8]>, size: usize) -> SimpleMmu {
+    impl Mmu for &RefCell<SimpleMmu> {
+        fn read_byte(&self, off: usize) -> Result<u8, Error> {
+            self.borrow().read_byte(off)
+        }
+
+        fn write_byte(&mut self, off: usize, b: u8) -> Result<(), Error> {
+            self.borrow_mut().write_byte(off, b)
+        }
+    }
+
+    fn new_mmu(data: impl AsRef<[u8]>, size: usize) -> RefCell<SimpleMmu> {
         let mut mmu = SimpleMmu::new(size);
         mmu.write(0, data).expect("mmu write");
-        mmu
+        RefCell::new(mmu)
     }
 
     #[test]
