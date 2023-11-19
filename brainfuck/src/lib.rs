@@ -106,16 +106,78 @@ impl InputStream for NopStream {
     }
 }
 
+/// The `Mmu` trait represents a generic memory management unit.
+pub trait Mmu {
+    /// Reads byte at `off`.
+    fn read_byte(&self, off: usize) -> Result<u8, Error>;
+
+    /// Writes byte `b` at `off`.
+    fn write_byte(&mut self, off: usize, b: u8) -> Result<(), Error>;
+}
+
+/// Simple thread-safe memory management unit.
+pub struct SimpleMmu {
+    mem: Arc<Mutex<Vec<u8>>>,
+}
+
+impl SimpleMmu {
+    /// Returns a [`SimpleMmu`] backed by a buffer of `size` bytes initialized to zero.
+    pub fn new(size: usize) -> SimpleMmu {
+        SimpleMmu {
+            mem: Arc::new(Mutex::new(vec![0u8; size])),
+        }
+    }
+
+    /// Writes `data` into the memory starting at `off`.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the memory lock cannot be acquired.
+    pub fn write(&mut self, off: usize, data: impl AsRef<[u8]>) -> Result<(), Error> {
+        let data = data.as_ref();
+        let end = off.checked_add(data.len()).ok_or(Error::Overflow)?;
+        let mut mem = self.mem.lock().expect("acquire lock");
+        mem.get_mut(off..end)
+            .ok_or(Error::OobRange(off, end))?
+            .copy_from_slice(data);
+        Ok(())
+    }
+}
+
+impl Mmu for &SimpleMmu {
+    /// Reads byte at `off`.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the memory lock cannot be acquired.
+    fn read_byte(&self, off: usize) -> Result<u8, Error> {
+        let mmu = self.mem.lock().expect("acquire lock");
+        let b = *mmu.get(off).ok_or(Error::Oob(off))?;
+        Ok(b)
+    }
+
+    /// Writes byte `b` at `off`.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the memory lock cannot be acquired.
+    fn write_byte(&mut self, off: usize, b: u8) -> Result<(), Error> {
+        let mut mem = self.mem.lock().expect("acquire lock");
+        *mem.get_mut(off).ok_or(Error::Oob(off))? = b;
+        Ok(())
+    }
+}
+
 /// Brainfuck interpreter.
-pub struct Interpreter<O: OutputStream = NopStream, I: InputStream = NopStream> {
+pub struct Interpreter<M: Mmu, O: OutputStream = NopStream, I: InputStream = NopStream> {
+    /// Memory management unit.
+    mmu: M,
+
     /// Program counter.
     pc: usize,
 
     /// Data pointer.
     ptr: usize,
-
-    /// Memory buffer.
-    mem: Arc<Mutex<Vec<u8>>>,
 
     /// Output stream handler.
     output_stream: O,
@@ -124,57 +186,57 @@ pub struct Interpreter<O: OutputStream = NopStream, I: InputStream = NopStream> 
     input_stream: I,
 }
 
-impl Interpreter {
+impl<M: Mmu> Interpreter<M> {
     /// Returns a new brainfuck interpreter. The program counter is initialized to `pc` and the data
     /// pointer is initialized to `ptr`.
-    pub fn new(mem: Arc<Mutex<Vec<u8>>>, pc: usize, ptr: usize) -> Interpreter {
+    pub fn new(mmu: M, pc: usize, ptr: usize) -> Interpreter<M> {
         Interpreter {
+            mmu,
             pc,
             ptr,
-            mem,
             output_stream: NopStream,
             input_stream: NopStream,
         }
     }
 }
 
-impl<O: OutputStream> Interpreter<O, NopStream> {
+impl<M: Mmu, O: OutputStream> Interpreter<M, O, NopStream> {
     /// Like [`Interpreter::new`] but allows to specify an output stream.
     pub fn with_output_stream(
-        mem: Arc<Mutex<Vec<u8>>>,
+        mmu: M,
         pc: usize,
         ptr: usize,
         output_stream: O,
-    ) -> Interpreter<O, NopStream> {
-        Self::with_streams(mem, pc, ptr, output_stream, NopStream)
+    ) -> Interpreter<M, O, NopStream> {
+        Self::with_streams(mmu, pc, ptr, output_stream, NopStream)
     }
 }
 
-impl<I: InputStream> Interpreter<NopStream, I> {
+impl<M: Mmu, I: InputStream> Interpreter<M, NopStream, I> {
     /// Like [`Interpreter::new`] but allows to specify an input stream.
     pub fn with_input_stream(
-        mem: Arc<Mutex<Vec<u8>>>,
+        mmu: M,
         pc: usize,
         ptr: usize,
         input_stream: I,
-    ) -> Interpreter<NopStream, I> {
-        Self::with_streams(mem, pc, ptr, NopStream, input_stream)
+    ) -> Interpreter<M, NopStream, I> {
+        Self::with_streams(mmu, pc, ptr, NopStream, input_stream)
     }
 }
 
-impl<O: OutputStream, I: InputStream> Interpreter<O, I> {
+impl<M: Mmu, O: OutputStream, I: InputStream> Interpreter<M, O, I> {
     /// Like [`Interpreter::new`] but allows to specify the I/O streams.
     pub fn with_streams(
-        mem: Arc<Mutex<Vec<u8>>>,
+        mmu: M,
         pc: usize,
         ptr: usize,
         output_stream: O,
         input_stream: I,
-    ) -> Interpreter<O, I> {
+    ) -> Interpreter<M, O, I> {
         Interpreter {
+            mmu,
             pc,
             ptr,
-            mem,
             output_stream,
             input_stream,
         }
@@ -191,24 +253,24 @@ impl<O: OutputStream, I: InputStream> Interpreter<O, I> {
     pub fn run_inst(&mut self) -> Result<(), Error> {
         let mut off = 1;
 
-        match self.read_byte(self.pc)?.try_into()? {
+        match self.mmu.read_byte(self.pc)?.try_into()? {
             Instruction::IncPtr => self.ptr = self.ptr.wrapping_add(1),
             Instruction::DecPtr => self.ptr = self.ptr.wrapping_sub(1),
             Instruction::IncData => {
-                let b = self.read_byte(self.ptr)?;
-                self.write_byte(self.ptr, b.wrapping_add(1))?
+                let b = self.mmu.read_byte(self.ptr)?;
+                self.mmu.write_byte(self.ptr, b.wrapping_add(1))?
             }
             Instruction::DecData => {
-                let b = self.read_byte(self.ptr)?;
-                self.write_byte(self.ptr, b.wrapping_sub(1))?
+                let b = self.mmu.read_byte(self.ptr)?;
+                self.mmu.write_byte(self.ptr, b.wrapping_sub(1))?
             }
             Instruction::Output => {
-                let b = self.read_byte(self.ptr)?;
+                let b = self.mmu.read_byte(self.ptr)?;
                 self.output_stream.write_byte(b)?
             }
             Instruction::Input => {
                 let b = self.input_stream.read_byte()?;
-                self.write_byte(self.ptr, b)?;
+                self.mmu.write_byte(self.ptr, b)?;
             }
             Instruction::StartLoop => off = self.jump_offset(LoopAt::Start)?,
             Instruction::EndLoop => off = self.jump_offset(LoopAt::End)?,
@@ -221,7 +283,7 @@ impl<O: OutputStream, I: InputStream> Interpreter<O, I> {
 
     /// Returns the offset to the next instruction depending on the current state.
     fn jump_offset(&self, at: LoopAt) -> Result<isize, Error> {
-        let b = self.read_byte(self.ptr)?;
+        let b = self.mmu.read_byte(self.ptr)?;
         let (jump, step, delta) = match at {
             LoopAt::Start => (b == 0, 1, 0),
             LoopAt::End => (b != 0, -1, 2),
@@ -235,7 +297,7 @@ impl<O: OutputStream, I: InputStream> Interpreter<O, I> {
         let mut off: isize = 0;
         loop {
             let pc = self.pc.wrapping_add_signed(off);
-            match self.read_byte(pc)?.try_into()? {
+            match self.mmu.read_byte(pc)?.try_into()? {
                 Instruction::StartLoop => {
                     ctr = ctr
                         .checked_add_signed(step)
@@ -256,28 +318,6 @@ impl<O: OutputStream, I: InputStream> Interpreter<O, I> {
         }
 
         off.checked_add(delta).ok_or(Error::Overflow)
-    }
-
-    /// Reads the byte at `off`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the memory lock cannot be acquired.
-    fn read_byte(&self, off: usize) -> Result<u8, Error> {
-        let mem = self.mem.lock().expect("acquire lock");
-        let b = mem.get(off).ok_or(Error::Oob(off))?;
-        Ok(*b)
-    }
-
-    /// Writes `b` at `off`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the memory lock cannot be acquired.
-    fn write_byte(&mut self, off: usize, b: u8) -> Result<(), Error> {
-        let mut mem = self.mem.lock().expect("acquire lock");
-        *mem.get_mut(off).ok_or(Error::Oob(off))? = b;
-        Ok(())
     }
 }
 
@@ -316,32 +356,26 @@ mod tests {
         }
     }
 
-    fn new_mem(data: impl AsRef<[u8]>, size: usize) -> Arc<Mutex<Vec<u8>>> {
-        let data = data.as_ref();
-        let mut mem = vec![0; size];
-        mem.get_mut(..data.len())
-            .expect("get mut slice range")
-            .copy_from_slice(data);
-        Arc::new(Mutex::new(mem))
+    fn new_mmu(data: impl AsRef<[u8]>, size: usize) -> SimpleMmu {
+        let mut mmu = SimpleMmu::new(size);
+        mmu.write(0, data).expect("mmu write");
+        mmu
     }
 
     #[test]
     fn run_inst() {
-        let mem = new_mem("+-+++", 16);
-        let mut bf = Interpreter::new(Arc::clone(&mem), 0, 8);
+        let mmu = &new_mmu("+-+++", 16);
+        let mut bf = Interpreter::new(mmu, 0, 8);
         for _ in 0..5 {
             bf.run_inst().expect("run instruction");
         }
-        assert_eq!(
-            mem.lock().expect("acquire lock").get(8).expect("read byte"),
-            &3
-        );
+        assert_eq!(mmu.read_byte(8).expect("read byte"), 3);
     }
 
     #[test]
     fn inc_data_ptr() {
-        let mem = new_mem(">", 16);
-        let mut bf = Interpreter::new(mem, 0, 8);
+        let mmu = &new_mmu(">", 16);
+        let mut bf = Interpreter::new(mmu, 0, 8);
         let res = bf.run();
         if !matches!(res, Err(Error::InvalidInst(0))) {
             panic!("unexpected result: {res:?}");
@@ -351,8 +385,8 @@ mod tests {
 
     #[test]
     fn dec_data_ptr() {
-        let mem = new_mem("<", 16);
-        let mut bf = Interpreter::new(mem, 0, 8);
+        let mmu = &new_mmu("<", 16);
+        let mut bf = Interpreter::new(mmu, 0, 8);
         let res = bf.run();
         if !matches!(res, Err(Error::InvalidInst(0))) {
             panic!("unexpected result: {res:?}");
@@ -362,37 +396,31 @@ mod tests {
 
     #[test]
     fn inc_data() {
-        let mem = new_mem("+", 16);
-        let mut bf = Interpreter::new(Arc::clone(&mem), 0, 8);
+        let mmu = &new_mmu("+", 16);
+        let mut bf = Interpreter::new(mmu, 0, 8);
         let res = bf.run();
         if !matches!(res, Err(Error::InvalidInst(0))) {
             panic!("unexpected result: {res:?}");
         }
-        assert_eq!(
-            mem.lock().expect("acquire lock").get(8).expect("read byte"),
-            &1
-        );
+        assert_eq!(mmu.read_byte(8).expect("read byte"), 1);
     }
 
     #[test]
     fn dec_data() {
-        let mem = new_mem("-", 16);
-        let mut bf = Interpreter::new(Arc::clone(&mem), 0, 8);
+        let mmu = &new_mmu("-", 16);
+        let mut bf = Interpreter::new(mmu, 0, 8);
         let res = bf.run();
         if !matches!(res, Err(Error::InvalidInst(0))) {
             panic!("unexpected result: {res:?}");
         }
-        assert_eq!(
-            mem.lock().expect("acquire lock").get(8).expect("read byte"),
-            &0xff
-        );
+        assert_eq!(mmu.read_byte(8).expect("read byte"), 0xff);
     }
 
     #[test]
     fn output_stream() {
-        let mem = new_mem("+++.", 16);
+        let mmu = &new_mmu("+++.", 16);
         let stream = TestStream::new();
-        let mut bf = Interpreter::with_output_stream(mem, 0, 8, &stream);
+        let mut bf = Interpreter::with_output_stream(mmu, 0, 8, &stream);
         let res = bf.run();
         if !matches!(res, Err(Error::InvalidInst(0))) {
             panic!("unexpected result: {res:?}");
@@ -402,24 +430,21 @@ mod tests {
 
     #[test]
     fn input_stream() {
-        let mem = new_mem(",", 16);
+        let mmu = &new_mmu(",", 16);
         let stream = TestStream::new();
-        let mut bf = Interpreter::with_input_stream(Arc::clone(&mem), 0, 8, &stream);
+        let mut bf = Interpreter::with_input_stream(mmu, 0, 8, &stream);
         let res = bf.run();
         if !matches!(res, Err(Error::InvalidInst(0))) {
             panic!("unexpected result: {res:?}");
         }
-        assert_eq!(
-            mem.lock().expect("acquire lock").get(8).expect("read byte"),
-            &0xaa
-        );
+        assert_eq!(mmu.read_byte(8).expect("read byte"), 0xaa);
     }
 
     #[test]
     fn input_output_streams() {
-        let mem = new_mem(",.", 16);
+        let mmu = &new_mmu(",.", 16);
         let stream = TestStream::new();
-        let mut bf = Interpreter::with_streams(mem, 0, 8, &stream, &stream);
+        let mut bf = Interpreter::with_streams(mmu, 0, 8, &stream, &stream);
         let res = bf.run();
         if !matches!(res, Err(Error::InvalidInst(0))) {
             panic!("unexpected result: {res:?}");
@@ -429,25 +454,20 @@ mod tests {
 
     #[test]
     fn simple_loop() {
-        let mem = new_mem("++++[->+<]", 32);
-        let mut bf = Interpreter::new(Arc::clone(&mem), 0, 16);
+        let mmu = &new_mmu("++++[->+<]", 32);
+        let mut bf = Interpreter::new(mmu, 0, 16);
         let res = bf.run();
         if !matches!(res, Err(Error::InvalidInst(0))) {
             panic!("unexpected result: {res:?}");
         }
-        assert_eq!(
-            mem.lock()
-                .expect("acquire lock")
-                .get(16..=17)
-                .expect("read range"),
-            &[0, 4]
-        );
+        assert_eq!(mmu.read_byte(16).expect("read byte"), 0);
+        assert_eq!(mmu.read_byte(17).expect("read byte"), 4);
     }
 
     #[test]
     fn unopened_loop() {
-        let mem = new_mem("+]", 16);
-        let mut bf = Interpreter::new(mem, 0, 8);
+        let mmu = &new_mmu("+]", 16);
+        let mut bf = Interpreter::new(mmu, 0, 8);
         let res = bf.run();
         if !matches!(res, Err(Error::Oob(_))) {
             panic!("unexpected result: {res:?}");
@@ -456,8 +476,8 @@ mod tests {
 
     #[test]
     fn unclosed_loop() {
-        let mem = new_mem("[", 16);
-        let mut bf = Interpreter::new(mem, 0, 8);
+        let mmu = &new_mmu("[", 16);
+        let mut bf = Interpreter::new(mmu, 0, 8);
         let res = bf.run();
         if !matches!(res, Err(Error::InvalidInst(0))) {
             panic!("unexpected result: {res:?}");
@@ -466,8 +486,8 @@ mod tests {
 
     #[test]
     fn missing_open_loop() {
-        let mem = new_mem("[]+]", 16);
-        let mut bf = Interpreter::new(mem, 0, 8);
+        let mmu = &new_mmu("[]+]", 16);
+        let mut bf = Interpreter::new(mmu, 0, 8);
         let res = bf.run();
         if !matches!(res, Err(Error::Oob(_))) {
             panic!("unexpected result: {res:?}");
@@ -476,8 +496,8 @@ mod tests {
 
     #[test]
     fn missing_close_loop() {
-        let mem = new_mem("[[]", 16);
-        let mut bf = Interpreter::new(mem, 0, 8);
+        let mmu = &new_mmu("[[]", 16);
+        let mut bf = Interpreter::new(mmu, 0, 8);
         let res = bf.run();
         if !matches!(res, Err(Error::InvalidInst(0))) {
             panic!("unexpected result: {res:?}");
@@ -490,9 +510,9 @@ mod tests {
             ++++++++[>++++[>++>+++>+++>+<<<<-]>+>+>->>+[<]<-]>>.>
             ---.+++++++..+++.>>.<-.<.+++.------.--------.>>+.>++.
         "#;
-        let mem = new_mem(code, 1024);
+        let mmu = &new_mmu(code, 1024);
         let stream = TestStream::new();
-        let mut bf = Interpreter::with_output_stream(mem, 0, 512, &stream);
+        let mut bf = Interpreter::with_output_stream(mmu, 0, 512, &stream);
         let res = bf.run();
         if !matches!(res, Err(Error::InvalidInst(0))) {
             panic!("unexpected result: {res:?}");
@@ -502,9 +522,9 @@ mod tests {
 
     #[test]
     fn invalid_inst() {
-        let mem = new_mem("++X", 16);
+        let mmu = &new_mmu("++X", 16);
         let stream = TestStream::new();
-        let mut bf = Interpreter::with_output_stream(mem, 0, 8, &stream);
+        let mut bf = Interpreter::with_output_stream(mmu, 0, 8, &stream);
         let res = bf.run();
         if !matches!(res, Err(Error::InvalidInst(b'X'))) {
             panic!("unexpected result: {res:?}");
@@ -513,9 +533,9 @@ mod tests {
 
     #[test]
     fn invalid_loop_inst() {
-        let mem = new_mem("[X]", 16);
+        let mmu = &new_mmu("[X]", 16);
         let stream = TestStream::new();
-        let mut bf = Interpreter::with_output_stream(mem, 0, 8, &stream);
+        let mut bf = Interpreter::with_output_stream(mmu, 0, 8, &stream);
         let res = bf.run();
         if !matches!(res, Err(Error::InvalidInst(b'X'))) {
             panic!("unexpected result: {res:?}");
@@ -524,16 +544,13 @@ mod tests {
 
     #[test]
     fn nop_stream() {
-        let mem = new_mem("+,.", 16);
-        let mut bf = Interpreter::with_streams(Arc::clone(&mem), 0, 8, NopStream, NopStream);
+        let mmu = &new_mmu("+,.", 16);
+        let mut bf = Interpreter::with_streams(mmu, 0, 8, NopStream, NopStream);
         let res = bf.run();
         if !matches!(res, Err(Error::InvalidInst(0))) {
             panic!("unexpected result: {res:?}");
         }
-        assert_eq!(
-            mem.lock().expect("acquire lock").get(8).expect("read byte"),
-            &0
-        );
+        assert_eq!(mmu.read_byte(8).expect("read byte"), 0);
     }
 
     #[test]
@@ -542,26 +559,15 @@ mod tests {
         mem[0] = b'+';
         mem[32] = b'-';
 
-        let mem = Arc::new(Mutex::new(mem));
-        let mut a = Interpreter::new(Arc::clone(&mem), 0, 16);
-        let mut b = Interpreter::new(Arc::clone(&mem), 32, 48);
+        let mmu = &new_mmu(&mem, mem.len());
+
+        let mut a = Interpreter::new(mmu, 0, 16);
+        let mut b = Interpreter::new(mmu, 32, 48);
 
         a.run_inst().expect("a failed to run inst");
         b.run_inst().expect("b failed to run inst");
 
-        assert_eq!(
-            mem.lock()
-                .expect("acquire lock")
-                .get(16)
-                .expect("read byte"),
-            &1,
-        );
-        assert_eq!(
-            mem.lock()
-                .expect("acquire lock")
-                .get(48)
-                .expect("read byte"),
-            &0xff,
-        );
+        assert_eq!(mmu.read_byte(16).expect("read byte"), 1);
+        assert_eq!(mmu.read_byte(48).expect("read byte"), 0xff);
     }
 }
