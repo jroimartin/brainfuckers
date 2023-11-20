@@ -342,26 +342,34 @@ mod tests {
         }
     }
 
-    impl Mmu for Rc<RefCell<SimpleMmu>> {
-        fn read_byte(&self, off: usize) -> Result<u8, Error> {
-            self.borrow().read_byte(off)
+    struct TestMmu(Rc<RefCell<SimpleMmu>>);
+
+    impl TestMmu {
+        fn new(data: impl AsRef<[u8]>, size: usize) -> TestMmu {
+            let mut mmu = SimpleMmu::new(size);
+            mmu.write(0, data).expect("mmu write");
+            TestMmu(Rc::new(RefCell::new(mmu)))
         }
 
-        fn write_byte(&mut self, off: usize, b: u8) -> Result<(), Error> {
-            self.borrow_mut().write_byte(off, b)
+        fn clone(&self) -> TestMmu {
+            TestMmu(Rc::clone(&self.0))
         }
     }
 
-    fn new_test_mmu(data: impl AsRef<[u8]>, size: usize) -> Rc<RefCell<SimpleMmu>> {
-        let mut mmu = SimpleMmu::new(size);
-        mmu.write(0, data).expect("mmu write");
-        Rc::new(RefCell::new(mmu))
+    impl Mmu for TestMmu {
+        fn read_byte(&self, off: usize) -> Result<u8, Error> {
+            self.0.borrow().read_byte(off)
+        }
+
+        fn write_byte(&mut self, off: usize, b: u8) -> Result<(), Error> {
+            self.0.borrow_mut().write_byte(off, b)
+        }
     }
 
     #[test]
     fn run_inst() {
-        let mmu = new_test_mmu("+-+++", 16);
-        let mut bf = Interpreter::new(Rc::clone(&mmu), 0, 8);
+        let mmu = TestMmu::new("+-+++", 16);
+        let mut bf = Interpreter::new(mmu.clone(), 0, 8);
         for _ in 0..5 {
             bf.run_inst().expect("run instruction");
         }
@@ -370,7 +378,7 @@ mod tests {
 
     #[test]
     fn inc_data_ptr() {
-        let mmu = new_test_mmu(">", 16);
+        let mmu = TestMmu::new(">", 16);
         let mut bf = Interpreter::new(mmu, 0, 8);
         let res = bf.run();
         if !matches!(res, Err(Error::InvalidInst(0))) {
@@ -381,7 +389,7 @@ mod tests {
 
     #[test]
     fn dec_data_ptr() {
-        let mmu = new_test_mmu("<", 16);
+        let mmu = TestMmu::new("<", 16);
         let mut bf = Interpreter::new(mmu, 0, 8);
         let res = bf.run();
         if !matches!(res, Err(Error::InvalidInst(0))) {
@@ -392,8 +400,8 @@ mod tests {
 
     #[test]
     fn inc_data() {
-        let mmu = new_test_mmu("+", 16);
-        let mut bf = Interpreter::new(Rc::clone(&mmu), 0, 8);
+        let mmu = TestMmu::new("+", 16);
+        let mut bf = Interpreter::new(mmu.clone(), 0, 8);
         let res = bf.run();
         if !matches!(res, Err(Error::InvalidInst(0))) {
             panic!("unexpected result: {res:?}");
@@ -403,8 +411,8 @@ mod tests {
 
     #[test]
     fn dec_data() {
-        let mmu = new_test_mmu("-", 16);
-        let mut bf = Interpreter::new(Rc::clone(&mmu), 0, 8);
+        let mmu = TestMmu::new("-", 16);
+        let mut bf = Interpreter::new(mmu.clone(), 0, 8);
         let res = bf.run();
         if !matches!(res, Err(Error::InvalidInst(0))) {
             panic!("unexpected result: {res:?}");
@@ -414,7 +422,7 @@ mod tests {
 
     #[test]
     fn output_stream() {
-        let mmu = new_test_mmu("+++.", 16);
+        let mmu = TestMmu::new("+++.", 16);
         let stream = TestStream::new();
         let mut bf = Interpreter::with_output_stream(mmu, 0, 8, &stream);
         let res = bf.run();
@@ -426,9 +434,9 @@ mod tests {
 
     #[test]
     fn input_stream() {
-        let mmu = new_test_mmu(",", 16);
+        let mmu = TestMmu::new(",", 16);
         let stream = TestStream::new();
-        let mut bf = Interpreter::with_input_stream(Rc::clone(&mmu), 0, 8, &stream);
+        let mut bf = Interpreter::with_input_stream(mmu.clone(), 0, 8, &stream);
         let res = bf.run();
         if !matches!(res, Err(Error::InvalidInst(0))) {
             panic!("unexpected result: {res:?}");
@@ -438,7 +446,7 @@ mod tests {
 
     #[test]
     fn input_output_streams() {
-        let mmu = new_test_mmu(",.", 16);
+        let mmu = TestMmu::new(",.", 16);
         let stream = TestStream::new();
         let mut bf = Interpreter::with_streams(mmu, 0, 8, &stream, &stream);
         let res = bf.run();
@@ -450,8 +458,8 @@ mod tests {
 
     #[test]
     fn simple_loop() {
-        let mmu = new_test_mmu("++++[->+<]", 32);
-        let mut bf = Interpreter::new(Rc::clone(&mmu), 0, 16);
+        let mmu = TestMmu::new("++++[->+<]", 32);
+        let mut bf = Interpreter::new(mmu.clone(), 0, 16);
         let res = bf.run();
         if !matches!(res, Err(Error::InvalidInst(0))) {
             panic!("unexpected result: {res:?}");
@@ -462,7 +470,7 @@ mod tests {
 
     #[test]
     fn unopened_loop() {
-        let mmu = new_test_mmu("+]", 16);
+        let mmu = TestMmu::new("+]", 16);
         let mut bf = Interpreter::new(mmu, 0, 8);
         let res = bf.run();
         if !matches!(res, Err(Error::Oob(_))) {
@@ -472,7 +480,7 @@ mod tests {
 
     #[test]
     fn unclosed_loop() {
-        let mmu = new_test_mmu("[", 16);
+        let mmu = TestMmu::new("[", 16);
         let mut bf = Interpreter::new(mmu, 0, 8);
         let res = bf.run();
         if !matches!(res, Err(Error::InvalidInst(0))) {
@@ -482,7 +490,7 @@ mod tests {
 
     #[test]
     fn missing_open_loop() {
-        let mmu = new_test_mmu("[]+]", 16);
+        let mmu = TestMmu::new("[]+]", 16);
         let mut bf = Interpreter::new(mmu, 0, 8);
         let res = bf.run();
         if !matches!(res, Err(Error::Oob(_))) {
@@ -492,7 +500,7 @@ mod tests {
 
     #[test]
     fn missing_close_loop() {
-        let mmu = new_test_mmu("[[]", 16);
+        let mmu = TestMmu::new("[[]", 16);
         let mut bf = Interpreter::new(mmu, 0, 8);
         let res = bf.run();
         if !matches!(res, Err(Error::InvalidInst(0))) {
@@ -506,7 +514,7 @@ mod tests {
             ++++++++[>++++[>++>+++>+++>+<<<<-]>+>+>->>+[<]<-]>>.>
             ---.+++++++..+++.>>.<-.<.+++.------.--------.>>+.>++.
         "#;
-        let mmu = new_test_mmu(code, 1024);
+        let mmu = TestMmu::new(code, 1024);
         let stream = TestStream::new();
         let mut bf = Interpreter::with_output_stream(mmu, 0, 512, &stream);
         let res = bf.run();
@@ -518,7 +526,7 @@ mod tests {
 
     #[test]
     fn invalid_inst() {
-        let mmu = new_test_mmu("++X", 16);
+        let mmu = TestMmu::new("++X", 16);
         let stream = TestStream::new();
         let mut bf = Interpreter::with_output_stream(mmu, 0, 8, &stream);
         let res = bf.run();
@@ -529,7 +537,7 @@ mod tests {
 
     #[test]
     fn invalid_loop_inst() {
-        let mmu = new_test_mmu("[X]", 16);
+        let mmu = TestMmu::new("[X]", 16);
         let stream = TestStream::new();
         let mut bf = Interpreter::with_output_stream(mmu, 0, 8, &stream);
         let res = bf.run();
@@ -540,8 +548,8 @@ mod tests {
 
     #[test]
     fn nop_stream() {
-        let mmu = new_test_mmu("+,.", 16);
-        let mut bf = Interpreter::with_streams(Rc::clone(&mmu), 0, 8, NopStream, NopStream);
+        let mmu = TestMmu::new("+,.", 16);
+        let mut bf = Interpreter::with_streams(mmu.clone(), 0, 8, NopStream, NopStream);
         let res = bf.run();
         if !matches!(res, Err(Error::InvalidInst(0))) {
             panic!("unexpected result: {res:?}");
@@ -555,10 +563,10 @@ mod tests {
         mem[0] = b'+';
         mem[32] = b'-';
 
-        let mmu = new_test_mmu(&mem, mem.len());
+        let mmu = TestMmu::new(&mem, mem.len());
 
-        let mut a = Interpreter::new(Rc::clone(&mmu), 0, 16);
-        let mut b = Interpreter::new(Rc::clone(&mmu), 32, 48);
+        let mut a = Interpreter::new(mmu.clone(), 0, 16);
+        let mut b = Interpreter::new(mmu.clone(), 32, 48);
 
         a.run_inst().expect("a failed to run inst");
         b.run_inst().expect("b failed to run inst");
