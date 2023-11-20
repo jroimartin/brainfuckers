@@ -120,7 +120,7 @@ pub struct SimpleMmu {
 }
 
 impl SimpleMmu {
-    /// Returns a [`SimpleMmu`] backed by a memory space of `size` bytes initialized to zero.
+    /// Returns a [`SimpleMmu`] backed by a memory area of `size` bytes initialized to zero.
     pub fn new(size: usize) -> SimpleMmu {
         SimpleMmu {
             mem: vec![0u8; size],
