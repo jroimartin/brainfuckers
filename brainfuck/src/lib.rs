@@ -1,6 +1,6 @@
 //! This crate implements a brainfuck interpreter.
 
-/// Error type.
+/// Brainfuck error.
 #[derive(Debug)]
 pub enum Error {
     /// Out-of-bounds offset.
@@ -136,6 +136,11 @@ impl SimpleMmu {
             .ok_or(Error::OobRange(off, end))?
             .copy_from_slice(data);
         Ok(())
+    }
+
+    /// Returns the size of the managed memory.
+    pub fn size(&self) -> usize {
+        self.mem.len()
     }
 }
 
@@ -350,7 +355,9 @@ mod tests {
             mmu.write(0, data).expect("mmu write");
             TestMmu(Rc::new(RefCell::new(mmu)))
         }
+    }
 
+    impl Clone for TestMmu {
         fn clone(&self) -> TestMmu {
             TestMmu(Rc::clone(&self.0))
         }
