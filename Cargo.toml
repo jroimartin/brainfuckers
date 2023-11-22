@@ -1,5 +1,6 @@
 [workspace]
 members = [
     "brainfuck",
+    "arena",
 ]
 resolver = "2"
