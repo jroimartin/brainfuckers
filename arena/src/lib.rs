@@ -285,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn battle() {
+    fn winner() {
         let w1 = "+[>+]";
         let w2 = "+[]";
 
