@@ -281,7 +281,6 @@ impl Arena {
             }
         }
 
-        println!("deaths={deaths:?} survivors={survivors:?}");
         match survivors.len() {
             0 => {
                 self.is_over = true;
