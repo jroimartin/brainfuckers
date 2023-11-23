@@ -178,7 +178,7 @@ impl Warrior {
 }
 
 /// State of the battle after a tick.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum BattleState {
     /// The specified warrior won.
     Winner(WarriorId),
@@ -191,6 +191,9 @@ pub enum BattleState {
 
     /// The battle is still ongoing.
     Ongoing,
+
+    /// The battle is over.
+    Over,
 }
 
 /// The arena where the programs fight each other.
@@ -206,6 +209,9 @@ pub struct Arena {
 
     /// Shared memory.
     mmu: ArenaMmu,
+
+    /// The battle is over.
+    is_over: bool,
 }
 
 impl Arena {
@@ -231,6 +237,7 @@ impl Arena {
 
         Ok(Arena {
             curtick: 0,
+            is_over: false,
             cycles,
             warriors,
             mmu,
@@ -244,6 +251,10 @@ impl Arena {
 
     /// Runs one tick.
     pub fn tick(&mut self) -> BattleState {
+        if self.is_over {
+            return BattleState::Over;
+        }
+
         if self.curtick > self.cycles {
             let survivors = self
                 .warriors
@@ -251,6 +262,7 @@ impl Arena {
                 .filter(|warrior| warrior.is_alive())
                 .map(|warrior| warrior.id)
                 .collect::<Vec<WarriorId>>();
+            self.is_over = true;
             return BattleState::Timeout(survivors);
         }
 
@@ -271,8 +283,14 @@ impl Arena {
 
         println!("deaths={deaths:?} survivors={survivors:?}");
         match survivors.len() {
-            0 => BattleState::Tie(deaths),
-            1 => BattleState::Winner(survivors[0]),
+            0 => {
+                self.is_over = true;
+                BattleState::Tie(deaths)
+            }
+            1 => {
+                self.is_over = true;
+                BattleState::Winner(survivors[0])
+            }
             _ => {
                 self.curtick += 1;
                 BattleState::Ongoing
@@ -331,5 +349,16 @@ mod tests {
                 other => panic!("unexpected state: {:?}", other),
             }
         }
+    }
+
+    #[test]
+    fn over() {
+        let w0 = "";
+        let w1 = "";
+
+        let mut arena = Arena::new(8192, 1, &[w0, w1]).expect("new arena");
+        arena.tick();
+        assert_eq!(arena.tick(), BattleState::Over);
+        assert_eq!(arena.tick(), BattleState::Over);
     }
 }
