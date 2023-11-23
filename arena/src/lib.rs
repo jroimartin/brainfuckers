@@ -1,12 +1,9 @@
-//! This crate implements the brainfucke.rs game dynamics.
+//! This crate implements the battle dynamics.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use brainfuck::{Interpreter, Mmu, SimpleMmu};
-
-/// The default maximum number of cycles.
-pub const DEFAULT_NUM_CYCLES: u64 = 8192;
 
 /// Arena error.
 #[derive(Debug)]
@@ -25,16 +22,42 @@ impl From<brainfuck::Error> for Error {
 }
 
 /// Memory operation.
-pub enum MemOp {
-    /// Read access. It provides the memory offset being read and the returned byte.
-    Read(usize, u8),
+pub struct MemOp {
+    /// Memory access type.
+    pub typ: AccessType,
 
-    /// Write access. It provides the memory offset being written and the stored byte.
-    Write(usize, u8),
+    /// Accessed memory offset.
+    pub off: usize,
+
+    /// Warrior ID.
+    pub warrior_id: Option<WarriorId>,
+}
+
+impl MemOp {
+    /// Returns a new [`MemOp`].
+    fn new(typ: AccessType, off: usize, warrior_id: Option<WarriorId>) -> MemOp {
+        MemOp {
+            typ,
+            off,
+            warrior_id,
+        }
+    }
+}
+
+/// Memory access type.
+pub enum AccessType {
+    /// Read access.
+    Read,
+
+    /// Write access.
+    Write,
 }
 
 /// Memory management unit that wraps [`SimpleMmu`] to add logging capabilities.
 struct ArenaMmu {
+    /// Warrior ID.
+    warrior_id: Option<WarriorId>,
+
     /// Wrapped mmu.
     mmu: Rc<RefCell<SimpleMmu>>,
 
@@ -46,6 +69,7 @@ impl ArenaMmu {
     /// Returns a new [`ArenaMmu`].
     fn new(size: usize) -> ArenaMmu {
         ArenaMmu {
+            warrior_id: None,
             mmu: Rc::new(RefCell::new(SimpleMmu::new(size))),
             ops: Rc::new(RefCell::new(Vec::new())),
         }
@@ -56,16 +80,16 @@ impl ArenaMmu {
         Ok(self.mmu.borrow_mut().write(off, data)?)
     }
 
+    // TODO(rm): Replace with Iterator.
     /// Pops a memory operation from the log.
     fn pop_mem_operation(&self) -> Option<MemOp> {
         self.ops.borrow_mut().pop()
     }
-}
 
-impl Clone for ArenaMmu {
-    /// Returns a new reference to the MMU.
-    fn clone(&self) -> ArenaMmu {
+    /// Returns a new reference to the MMU. This reference is linked to the provided warrior.
+    fn clone(&self, warrior_id: WarriorId) -> ArenaMmu {
         ArenaMmu {
+            warrior_id: Some(warrior_id),
             mmu: Rc::clone(&self.mmu),
             ops: Rc::clone(&self.ops),
         }
@@ -75,17 +99,24 @@ impl Clone for ArenaMmu {
 impl Mmu for ArenaMmu {
     /// Reads a byte from memory and logs the operation.
     fn read_byte(&self, off: usize) -> Result<u8, brainfuck::Error> {
-        let b = self.mmu.borrow().read_byte(off)?;
-        self.ops.borrow_mut().push(MemOp::Read(off, b));
-        Ok(b)
+        self.ops
+            .borrow_mut()
+            .push(MemOp::new(AccessType::Read, off, self.warrior_id));
+        self.mmu.borrow().read_byte(off)
     }
 
     /// Writes a byte into memory and logs the operation.
     fn write_byte(&mut self, off: usize, b: u8) -> Result<(), brainfuck::Error> {
-        self.ops.borrow_mut().push(MemOp::Write(off, b));
+        self.ops
+            .borrow_mut()
+            .push(MemOp::new(AccessType::Write, off, self.warrior_id));
         self.mmu.borrow_mut().write_byte(off, b)
     }
 }
+
+/// Warrior ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WarriorId(usize);
 
 /// The state of a warrior.
 enum WarriorState {
@@ -98,8 +129,8 @@ enum WarriorState {
 
 /// Represents a battle program.
 struct Warrior {
-    /// Warrior index.
-    idx: usize,
+    /// Warrior ID.
+    id: WarriorId,
 
     /// The brainfuck interpreter handling the warrior code.
     bf: Interpreter<ArenaMmu>,
@@ -113,7 +144,7 @@ impl Warrior {
     /// provided `program` must be copied into the `mmu` memory. If the program size is bigger than
     /// `rsv` bytes it returns error.
     fn new(
-        idx: usize,
+        id: WarriorId,
         mmu: ArenaMmu,
         program: impl AsRef<[u8]>,
         rsv: usize,
@@ -123,14 +154,14 @@ impl Warrior {
             return Err(Error::InvalidSize);
         }
 
-        let pc = idx * rsv;
+        let pc = id.0 * rsv;
         let ptr = pc + prog.len();
         mmu.write(pc, prog)?;
-        let bf = Interpreter::new(mmu.clone(), pc, ptr);
+        let bf = Interpreter::new(mmu.clone(id), pc, ptr);
 
         Ok(Warrior {
             state: WarriorState::Alive,
-            idx,
+            id,
             bf,
         })
     }
@@ -149,14 +180,14 @@ impl Warrior {
 /// State of the battle after a tick.
 #[derive(Debug)]
 pub enum BattleState {
-    /// The warrior with the specified index is the winner.
-    Winner(usize),
+    /// The specified warrior won.
+    Winner(WarriorId),
 
-    /// All the warriors died on the same cycle.
-    Tie,
+    /// The specified warriors were the last ones alive and died on the same cycle.
+    Tie(Vec<WarriorId>),
 
-    /// The battle timed out.
-    Timeout,
+    /// The battle timed out. The specified warriors remained alive.
+    Timeout(Vec<WarriorId>),
 
     /// The battle is still ongoing.
     Ongoing,
@@ -181,6 +212,7 @@ impl Arena {
     /// Returns a new [`Arena`].
     pub fn new(
         size: usize,
+        cycles: u64,
         programs: impl IntoIterator<Item = impl AsRef<[u8]>>,
     ) -> Result<Arena, Error> {
         let programs = programs
@@ -194,21 +226,15 @@ impl Arena {
         let warriors = programs
             .iter()
             .enumerate()
-            .map(|(i, prog)| Warrior::new(i, mmu.clone(), prog, rsv))
+            .map(|(i, prog)| Warrior::new(WarriorId(i), mmu.clone(WarriorId(i)), prog, rsv))
             .collect::<Result<Vec<Warrior>, Error>>()?;
 
         Ok(Arena {
-            cycles: DEFAULT_NUM_CYCLES,
             curtick: 0,
+            cycles,
             warriors,
             mmu,
         })
-    }
-
-    /// Sets the number of cycles before the fight is considered tied.
-    pub fn cycles(&mut self, cycles: u64) -> &mut Arena {
-        self.cycles = cycles;
-        self
     }
 
     /// Pops a memory operation from the log.
@@ -218,35 +244,40 @@ impl Arena {
 
     /// Runs one tick.
     pub fn tick(&mut self) -> BattleState {
-        let alive = self
-            .warriors
-            .iter()
-            .filter(|warrior| warrior.is_alive())
-            .map(|warrior| warrior.idx)
-            .collect::<Vec<usize>>();
-
-        match alive.len() {
-            0 => return BattleState::Tie,
-            1 => return BattleState::Winner(alive[0]),
-            _ => {}
-        }
-
         if self.curtick > self.cycles {
-            return BattleState::Timeout;
+            let survivors = self
+                .warriors
+                .iter()
+                .filter(|warrior| warrior.is_alive())
+                .map(|warrior| warrior.id)
+                .collect::<Vec<WarriorId>>();
+            return BattleState::Timeout(survivors);
         }
 
+        let mut deaths = Vec::new();
+        let mut survivors = Vec::new();
         for warrior in &mut self.warriors {
             if !warrior.is_alive() {
                 continue;
             }
             match warrior.bf.run_inst() {
-                Ok(_) => {}
-                Err(err) => warrior.kill(err, self.curtick),
+                Ok(_) => survivors.push(warrior.id),
+                Err(err) => {
+                    warrior.kill(err, self.curtick);
+                    deaths.push(warrior.id);
+                }
             }
         }
-        self.curtick += 1;
 
-        BattleState::Ongoing
+        println!("deaths={deaths:?} survivors={survivors:?}");
+        match survivors.len() {
+            0 => BattleState::Tie(deaths),
+            1 => BattleState::Winner(survivors[0]),
+            _ => {
+                self.curtick += 1;
+                BattleState::Ongoing
+            }
+        }
     }
 }
 
@@ -256,13 +287,16 @@ mod tests {
 
     #[test]
     fn tie() {
+        let w0 = "";
         let w1 = "";
-        let w2 = "";
 
-        let mut arena = Arena::new(8192, &[w1, w2]).expect("new arena");
+        let mut arena = Arena::new(8192, 1, &[w0, w1]).expect("new arena");
         loop {
             match arena.tick() {
-                BattleState::Tie => break,
+                BattleState::Tie(warriors) => {
+                    assert_eq!(warriors, &[WarriorId(0), WarriorId(1)]);
+                    break;
+                }
                 BattleState::Ongoing => {}
                 other => panic!("unexpected state: {:?}", other),
             }
@@ -271,13 +305,13 @@ mod tests {
 
     #[test]
     fn timeout() {
+        let w0 = "+[]";
         let w1 = "+[]";
-        let w2 = "+[]";
 
-        let mut arena = Arena::new(8192, &[w1, w2]).expect("new arena");
+        let mut arena = Arena::new(8192, 100, &[w0, w1]).expect("new arena");
         loop {
             match arena.tick() {
-                BattleState::Timeout => break,
+                BattleState::Timeout(_) => break,
                 BattleState::Ongoing => {}
                 other => panic!("unexpected state: {:?}", other),
             }
@@ -286,14 +320,13 @@ mod tests {
 
     #[test]
     fn winner() {
-        let w1 = "+[>+]";
-        let w2 = "+[]";
+        let w0 = "+[>+]";
+        let w1 = "+[]";
 
-        let mut arena = Arena::new(8192, &[w1, w2]).expect("new arena");
-        let arena = arena.cycles(16_000);
+        let mut arena = Arena::new(8192, 16_000, &[w0, w1]).expect("new arena");
         loop {
             match arena.tick() {
-                BattleState::Winner(0) => break,
+                BattleState::Winner(WarriorId(0)) => break,
                 BattleState::Ongoing => {}
                 other => panic!("unexpected state: {:?}", other),
             }
