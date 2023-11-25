@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use brainfuck::{Interpreter, Mmu, SimpleMmu};
+use brainfuck::{Interpreter, Mmu, ReadMode, SimpleMmu};
 
 /// Arena error.
 #[derive(Debug)]
@@ -48,11 +48,14 @@ impl MemOp {
 /// Memory access type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccessType {
-    /// Read access.
+    /// Read data.
     Read,
 
-    /// Write access.
+    /// Write data.
     Write,
+
+    /// Read instruction.
+    Exec,
 }
 
 /// Memory management unit that wraps [`SimpleMmu`] to add logging capabilities.
@@ -99,11 +102,14 @@ impl ArenaMmu {
 
 impl Mmu for ArenaMmu {
     /// Reads a byte from memory and logs the operation.
-    fn read_byte(&self, off: usize) -> Result<u8, brainfuck::Error> {
-        self.ops
-            .borrow_mut()
-            .push(MemOp::new(AccessType::Read, off, self.warrior_id));
-        self.mmu.borrow().read_byte(off)
+    fn read_byte(&self, off: usize, mode: ReadMode) -> Result<u8, brainfuck::Error> {
+        let mut ops = self.ops.borrow_mut();
+        match mode {
+            ReadMode::Inst => ops.push(MemOp::new(AccessType::Exec, off, self.warrior_id)),
+            ReadMode::Data => ops.push(MemOp::new(AccessType::Read, off, self.warrior_id)),
+            _ => {}
+        };
+        self.mmu.borrow().read_byte(off, mode)
     }
 
     /// Writes a byte into memory and logs the operation.
@@ -371,7 +377,7 @@ mod tests {
         arena.tick();
         let expected = vec![
             MemOp {
-                typ: AccessType::Read,
+                typ: AccessType::Exec,
                 off: 0,
                 warrior_id: Some(WarriorId(0)),
             },
@@ -386,7 +392,7 @@ mod tests {
                 warrior_id: Some(WarriorId(0)),
             },
             MemOp {
-                typ: AccessType::Read,
+                typ: AccessType::Exec,
                 off: 4096,
                 warrior_id: Some(WarriorId(1)),
             },

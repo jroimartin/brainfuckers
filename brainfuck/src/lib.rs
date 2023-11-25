@@ -104,10 +104,22 @@ impl InputStream for NopStream {
     }
 }
 
+/// Read mode.
+pub enum ReadMode {
+    /// Instruction.
+    Inst,
+
+    /// Data.
+    Data,
+
+    /// Seek.
+    Seek,
+}
+
 /// The `Mmu` trait represents a generic memory management unit.
 pub trait Mmu {
     /// Reads byte at `off`.
-    fn read_byte(&self, off: usize) -> Result<u8, Error>;
+    fn read_byte(&self, off: usize, mode: ReadMode) -> Result<u8, Error>;
 
     /// Writes byte `b` at `off`.
     fn write_byte(&mut self, off: usize, b: u8) -> Result<(), Error>;
@@ -146,7 +158,7 @@ impl SimpleMmu {
 
 impl Mmu for SimpleMmu {
     /// Reads byte at `off`.
-    fn read_byte(&self, off: usize) -> Result<u8, Error> {
+    fn read_byte(&self, off: usize, _mode: ReadMode) -> Result<u8, Error> {
         let b = *self.mem.get(off).ok_or(Error::Oob(off))?;
         Ok(b)
     }
@@ -243,19 +255,19 @@ impl<M: Mmu, O: OutputStream, I: InputStream> Interpreter<M, O, I> {
     pub fn run_inst(&mut self) -> Result<(), Error> {
         let mut off = 1;
 
-        match self.mmu.read_byte(self.pc)?.try_into()? {
+        match self.mmu.read_byte(self.pc, ReadMode::Inst)?.try_into()? {
             Instruction::IncPtr => self.ptr = self.ptr.wrapping_add(1),
             Instruction::DecPtr => self.ptr = self.ptr.wrapping_sub(1),
             Instruction::IncData => {
-                let b = self.mmu.read_byte(self.ptr)?;
+                let b = self.mmu.read_byte(self.ptr, ReadMode::Data)?;
                 self.mmu.write_byte(self.ptr, b.wrapping_add(1))?
             }
             Instruction::DecData => {
-                let b = self.mmu.read_byte(self.ptr)?;
+                let b = self.mmu.read_byte(self.ptr, ReadMode::Data)?;
                 self.mmu.write_byte(self.ptr, b.wrapping_sub(1))?
             }
             Instruction::Output => {
-                let b = self.mmu.read_byte(self.ptr)?;
+                let b = self.mmu.read_byte(self.ptr, ReadMode::Data)?;
                 self.output_stream.write_byte(b)?
             }
             Instruction::Input => {
@@ -273,7 +285,7 @@ impl<M: Mmu, O: OutputStream, I: InputStream> Interpreter<M, O, I> {
 
     /// Returns the offset to the next instruction depending on the current state.
     fn jump_offset(&self, at: LoopAt) -> Result<isize, Error> {
-        let b = self.mmu.read_byte(self.ptr)?;
+        let b = self.mmu.read_byte(self.ptr, ReadMode::Data)?;
         let (jump, step, delta) = match at {
             LoopAt::Start => (b == 0, 1, 0),
             LoopAt::End => (b != 0, -1, 2),
@@ -287,7 +299,7 @@ impl<M: Mmu, O: OutputStream, I: InputStream> Interpreter<M, O, I> {
         let mut off: isize = 0;
         loop {
             let pc = self.pc.wrapping_add_signed(off);
-            match self.mmu.read_byte(pc)?.try_into()? {
+            match self.mmu.read_byte(pc, ReadMode::Seek)?.try_into()? {
                 Instruction::StartLoop => {
                     ctr = ctr
                         .checked_add_signed(step)
@@ -364,8 +376,8 @@ mod tests {
     }
 
     impl Mmu for TestMmu {
-        fn read_byte(&self, off: usize) -> Result<u8, Error> {
-            self.0.borrow().read_byte(off)
+        fn read_byte(&self, off: usize, mode: ReadMode) -> Result<u8, Error> {
+            self.0.borrow().read_byte(off, mode)
         }
 
         fn write_byte(&mut self, off: usize, b: u8) -> Result<(), Error> {
@@ -380,7 +392,7 @@ mod tests {
         for _ in 0..5 {
             bf.run_inst().expect("run instruction");
         }
-        assert_eq!(mmu.read_byte(8).expect("read byte"), 3);
+        assert_eq!(mmu.read_byte(8, ReadMode::Data).expect("read byte"), 3);
     }
 
     #[test]
@@ -413,7 +425,7 @@ mod tests {
         if !matches!(res, Err(Error::InvalidInst(0))) {
             panic!("unexpected result: {res:?}");
         }
-        assert_eq!(mmu.read_byte(8).expect("read byte"), 1);
+        assert_eq!(mmu.read_byte(8, ReadMode::Data).expect("read byte"), 1);
     }
 
     #[test]
@@ -424,7 +436,7 @@ mod tests {
         if !matches!(res, Err(Error::InvalidInst(0))) {
             panic!("unexpected result: {res:?}");
         }
-        assert_eq!(mmu.read_byte(8).expect("read byte"), 0xff);
+        assert_eq!(mmu.read_byte(8, ReadMode::Data).expect("read byte"), 0xff);
     }
 
     #[test]
@@ -448,7 +460,7 @@ mod tests {
         if !matches!(res, Err(Error::InvalidInst(0))) {
             panic!("unexpected result: {res:?}");
         }
-        assert_eq!(mmu.read_byte(8).expect("read byte"), 0xaa);
+        assert_eq!(mmu.read_byte(8, ReadMode::Data).expect("read byte"), 0xaa);
     }
 
     #[test]
@@ -471,8 +483,8 @@ mod tests {
         if !matches!(res, Err(Error::InvalidInst(0))) {
             panic!("unexpected result: {res:?}");
         }
-        assert_eq!(mmu.read_byte(16).expect("read byte"), 0);
-        assert_eq!(mmu.read_byte(17).expect("read byte"), 4);
+        assert_eq!(mmu.read_byte(16, ReadMode::Data).expect("read byte"), 0);
+        assert_eq!(mmu.read_byte(17, ReadMode::Data).expect("read byte"), 4);
     }
 
     #[test]
@@ -561,7 +573,7 @@ mod tests {
         if !matches!(res, Err(Error::InvalidInst(0))) {
             panic!("unexpected result: {res:?}");
         }
-        assert_eq!(mmu.read_byte(8).expect("read byte"), 0);
+        assert_eq!(mmu.read_byte(8, ReadMode::Data).expect("read byte"), 0);
     }
 
     #[test]
@@ -578,7 +590,7 @@ mod tests {
         a.run_inst().expect("a failed to run inst");
         b.run_inst().expect("b failed to run inst");
 
-        assert_eq!(mmu.read_byte(16).expect("read byte"), 1);
-        assert_eq!(mmu.read_byte(48).expect("read byte"), 0xff);
+        assert_eq!(mmu.read_byte(16, ReadMode::Data).expect("read byte"), 1);
+        assert_eq!(mmu.read_byte(48, ReadMode::Data).expect("read byte"), 0xff);
     }
 }
