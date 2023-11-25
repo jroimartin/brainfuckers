@@ -22,6 +22,7 @@ impl From<brainfuck::Error> for Error {
 }
 
 /// Memory operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemOp {
     /// Memory access type.
     pub typ: AccessType,
@@ -45,6 +46,7 @@ impl MemOp {
 }
 
 /// Memory access type.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccessType {
     /// Read access.
     Read,
@@ -80,10 +82,9 @@ impl ArenaMmu {
         Ok(self.mmu.borrow_mut().write(off, data)?)
     }
 
-    // TODO(rm): Replace with Iterator.
-    /// Pops a memory operation from the log.
-    fn pop_mem_operation(&self) -> Option<MemOp> {
-        self.ops.borrow_mut().pop()
+    /// Returns the executed memory operations.
+    fn ops(&self) -> Vec<MemOp> {
+        self.ops.borrow().to_vec()
     }
 
     /// Returns a new reference to the MMU. This reference is linked to the provided warrior.
@@ -116,7 +117,7 @@ impl Mmu for ArenaMmu {
 
 /// Warrior ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WarriorId(usize);
+pub struct WarriorId(pub usize);
 
 /// The state of a warrior.
 enum WarriorState {
@@ -223,7 +224,7 @@ impl Arena {
     ) -> Result<Arena, Error> {
         let programs = programs
             .into_iter()
-            .map(|prog| prog.as_ref().to_owned())
+            .map(|prog| prog.as_ref().to_vec())
             .collect::<Vec<Vec<u8>>>();
 
         let rsv = size / programs.len();
@@ -244,9 +245,9 @@ impl Arena {
         })
     }
 
-    /// Pops a memory operation from the log.
-    pub fn pop_mem_operation(&self) -> Option<MemOp> {
-        self.mmu.pop_mem_operation()
+    /// Returns the executed memory operations.
+    pub fn memops(&self) -> Vec<MemOp> {
+        self.mmu.ops()
     }
 
     /// Runs one tick.
@@ -359,5 +360,37 @@ mod tests {
         arena.tick();
         assert_eq!(arena.tick(), BattleState::Over);
         assert_eq!(arena.tick(), BattleState::Over);
+    }
+
+    #[test]
+    fn memops() {
+        let w0 = "+";
+        let w1 = ">";
+
+        let mut arena = Arena::new(8192, 100, &[w0, w1]).expect("new arena");
+        arena.tick();
+        let expected = vec![
+            MemOp {
+                typ: AccessType::Read,
+                off: 0,
+                warrior_id: Some(WarriorId(0)),
+            },
+            MemOp {
+                typ: AccessType::Read,
+                off: 1,
+                warrior_id: Some(WarriorId(0)),
+            },
+            MemOp {
+                typ: AccessType::Write,
+                off: 1,
+                warrior_id: Some(WarriorId(0)),
+            },
+            MemOp {
+                typ: AccessType::Read,
+                off: 4096,
+                warrior_id: Some(WarriorId(1)),
+            },
+        ];
+        assert_eq!(arena.memops(), expected);
     }
 }
