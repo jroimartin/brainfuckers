@@ -9,7 +9,9 @@ environment.
 This repository contains the following packages:
 
 - [brainfuck]: Brainfuck interpreter.
+- [arena]: Battle dynamics.
 
 
 [Core War]: https://en.wikipedia.org/wiki/Core_War
 [brainfuck]: /brainfuck
+[arena]: /arena
